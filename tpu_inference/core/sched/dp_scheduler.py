@@ -147,6 +147,60 @@ def _disable_cloudpickle():
     multiprocessing.reduction.ForkingPickler.loads = _original_loads
 
 
+def _vllm_config_for_rank(vllm_config: Any, rank: int) -> Any:
+    """Config for the scheduler of DP rank ``rank``, which publishes as that rank.
+
+    Every rank scheduler is a stock vLLM ``Scheduler`` built from the SAME
+    ``vllm_config``. vLLM keys the identity of a scheduler's KV-event publisher
+    on ``parallel_config.data_parallel_index``: the ZMQ endpoint's port is
+    offset by it (``tcp://*:5557`` -> ``5557 + index``; ipc/inproc endpoints get
+    a ``_dp<index>`` suffix) and every published batch is tagged with it as
+    ``data_parallel_rank``. Under SPMD DP that index is 0 for all ranks, so
+    with a binding endpoint (the vLLM default, llm-d's ``tcp://*:5556``, or any
+    ``replay_endpoint``) the first rank takes the port and every other rank
+    worker dies with "Address already in use" (and the engine with it, at its
+    first scheduler call); with a connecting endpoint nothing crashes but the
+    ranks are indistinguishable (every batch says rank 0).
+
+    The index is changed on a shallow copy, so the caller's config (and, in the
+    tests that run a worker in-process, the parent's) is untouched.
+    """
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if parallel_config is None:
+        return vllm_config
+    try:
+        rank_parallel_config = copy.copy(parallel_config)
+        rank_parallel_config.data_parallel_index = rank
+        rank_config = copy.copy(vllm_config)
+        rank_config.parallel_config = rank_parallel_config
+    except Exception as e:  # never keep a rank worker from starting
+        logger.warning(
+            "Could not give DP rank %d its own data_parallel_index (%s); "
+            "its KV events will be published as rank %s.", rank, e,
+            getattr(parallel_config, "data_parallel_index", "?"))
+        return vllm_config
+    return rank_config
+
+
+def _log_kv_events_endpoint(scheduler: Any, rank: int) -> None:
+    """Say where this rank publishes KV events (only newer vLLM can tell).
+
+    ``tcp://*:0`` binds an ephemeral port that nothing else reports, and vLLM's
+    engine handshake (``/kv_event_sources``) carries a single config per
+    engine, which cannot describe one publisher per DP rank.
+    """
+    getter = getattr(scheduler, "get_kv_event_publisher_config", None)
+    if getter is None:
+        return
+    try:
+        config = getter()
+    except Exception:
+        return
+    if config is not None:
+        logger.info("DP rank %d publishes KV events on %s (replay: %s)", rank,
+                    config.endpoint, config.replay_endpoint)
+
+
 def _scheduler_worker_process(
     rank: int,
     input_conn: Connection,
@@ -166,6 +220,7 @@ def _scheduler_worker_process(
     import gc
     atexit._clear()
     gc.enable()
+    vllm_config = _vllm_config_for_rank(vllm_config, rank)
     cache_config = getattr(vllm_config, "cache_config", None)
     if getattr(cache_config, "mamba_cache_mode", "none") == "align":
         from tpu_inference.core.hybrid_coordinator import (
@@ -207,6 +262,7 @@ def _scheduler_worker_process(
     _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
 
     logger.info(f"Scheduler worker process {rank} started (PID={os.getpid()})")
+    _log_kv_events_endpoint(scheduler, rank)
 
     def _send_result(result):
         """Send result back using cloudpickle serialization."""
