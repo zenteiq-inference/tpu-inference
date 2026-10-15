@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     ENABLE_RS_KERNEL: bool = False
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    DP_SCHED_ROUTING: str = "legacy"
     DP_SCHED_KV_AGGREGATE: str = "mean"
     DP_SCHED_RANK_METRICS: bool = True
     DP_SCHED_RANK_METRICS_INTERVAL_S: float = 1.0
@@ -361,6 +362,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DP scheduler: timeout (ms) to force flush pending requests.
     "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
+    # DP scheduler: how new requests are assigned to DP ranks. "legacy"
+    # (default): the rank with the longest prefix-cache hit, else the fewest
+    # pending prefill tokens (load is ignored on a hit, ties go to rank 0).
+    # "load": dp_rank_picker, which keeps prefix affinity only while the hit
+    # rank is not meaningfully hotter (KV usage, queue, pending prefill) than
+    # the least-loaded rank. Anything else is reported and treated as legacy.
+    # The picker's thresholds are DP_SCHED_AFFINITY_* / DP_SCHED_KV_* (see
+    # dp_rank_picker). A client-requested rank always wins.
+    "DP_SCHED_ROUTING":
+    lambda: os.getenv("DP_SCHED_ROUTING", "legacy"),
     # DP scheduler: how the per-rank KV-cache usage is reduced into the single
     # vllm:kv_cache_usage_perc gauge. "mean" (default) is the pooled usage and
     # hides one full rank behind idle ones; "max" exports the hottest rank,

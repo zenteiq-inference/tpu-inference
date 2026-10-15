@@ -48,8 +48,10 @@ from tpu_inference import envs
 from tpu_inference.core.sched.dp_metrics import (DPRankMetrics,
                                                  aggregate_kv_usage,
                                                  count_preemptions)
-from tpu_inference.core.sched.dp_rank_hint import (
-    get_dp_rank_hint, install_input_processor_hook)
+from tpu_inference.core.sched.dp_rank_hint import (get_dp_rank_hint,
+                                                   install_input_processor_hook
+                                                   )
+from tpu_inference.core.sched.dp_rank_picker import PickerConfig, pick_rank
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import time_function
 
@@ -71,6 +73,7 @@ class SchedulerCommand(Enum):
     GET_REQUEST_COUNTS = "get_request_counts"
     GET_TOKEN_COUNT = "get_token_count"
     GET_PENDING_PREFILL_TOKENS = "get_pending_prefill_tokens"
+    GET_RANK_LOAD = "get_rank_load"
     PROBE_COMPUTED_BLOCKS = "probe_computed_blocks"
     RESET_ENCODER_CACHE = "reset_encoder_cache"
     SET_PAUSE_STATE = "set_pause_state"
@@ -313,6 +316,34 @@ def _scheduler_worker_process(
                         pending += req.num_prompt_tokens
                     _send_result(pending)
 
+                case SchedulerCommand.GET_RANK_LOAD:
+                    # Everything the load-aware picker needs, in ONE round trip.
+                    # `waiting` INCLUDES skipped_waiting (requests blocked on a
+                    # grammar compile etc.), which GET_REQUEST_COUNTS and the DP
+                    # stats drop.
+                    skipped = getattr(scheduler, "skipped_waiting", ())
+                    pending = 0
+                    for req in scheduler.running:
+                        remaining = req.num_prompt_tokens - req.num_computed_tokens
+                        if remaining > 0:
+                            pending += remaining
+                    for req in scheduler.waiting:
+                        pending += req.num_prompt_tokens
+                    for req in skipped:
+                        pending += req.num_prompt_tokens
+                    _send_result({
+                        "running":
+                        len(scheduler.running),
+                        "waiting":
+                        len(scheduler.waiting) + len(skipped),
+                        "pending_prefill_tokens":
+                        pending,
+                        "kv_usage":
+                        scheduler.kv_cache_manager.usage,
+                        "num_blocks":
+                        scheduler.kv_cache_manager.block_pool.num_gpu_blocks,
+                    })
+
                 case SchedulerCommand.PROBE_COMPUTED_BLOCKS:
                     # Probe for cached blocks without recording prefix cache stats.
                     request = data
@@ -455,6 +486,27 @@ class DPScheduler(SchedulerInterface):
                 vllm_config, self.dp_size,
                 envs.DP_SCHED_RANK_METRICS_INTERVAL_S)
             if envs.DP_SCHED_RANK_METRICS else None)
+
+        # Rank routing: DP_SCHED_ROUTING=legacy (default, the historical
+        # prefix-hit-then-fewest-pending picker) or load (dp_rank_picker). A bad
+        # value is reported and ignored: it must not keep an engine from starting.
+        self._rank_routing: str = envs.DP_SCHED_ROUTING.strip().lower()
+        if self._rank_routing not in ("legacy", "load"):
+            logger.warning(
+                "DP_SCHED_ROUTING=%r is not legacy|load; using legacy",
+                self._rank_routing)
+            self._rank_routing = "legacy"
+        self._picker_cfg = PickerConfig.from_env()
+        if self._picker_cfg.bad_env:
+            logger.warning(
+                "DPScheduler: invalid value(s), using defaults for %s",
+                ",".join(self._picker_cfg.bad_env))
+        self._max_seqs_per_rank: int = int(
+            vllm_config.scheduler_config.max_num_seqs)
+        self._rank_routed_total: List[int] = [0] * self.dp_size
+        self._route_reasons: Dict[str, int] = {}
+        logger.info("DPScheduler rank routing=%s picker=%s",
+                    self._rank_routing, self._picker_cfg)
 
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
@@ -686,10 +738,17 @@ class DPScheduler(SchedulerInterface):
         0. A client-requested rank (X-data-parallel-rank) wins outright.
         1. Prefix cache hit: assign to rank with best cache hit.
         2. Otherwise: pick rank with the fewest pending prefill tokens.
+
+        With DP_SCHED_ROUTING=load, 1 and 2 are replaced by
+        _find_best_rank_load_aware().
         """
         requested = self._requested_rank(request)
         if requested is not None:
+            self._route_reasons["hint"] = self._route_reasons.get("hint",
+                                                                  0) + 1
             return requested
+        if self._rank_routing == "load":
+            return self._find_best_rank_load_aware(request)
 
         # First, try to find a rank with prefix cache hit.
         if self.vllm_config.cache_config.enable_prefix_caching:
@@ -711,6 +770,48 @@ class DPScheduler(SchedulerInterface):
 
         pending = self._get_rank_pending_prefill_tokens()
         return min(pending, key=pending.get)
+
+    def _find_best_rank_load_aware(self, request: Request) -> int:
+        """Prefix affinity only when it is worth it, else the cooler rank.
+
+        The prefix probe and the load query are pipelined (sent back to back on
+        each rank's pipe, read back in order), so this costs the same number of
+        IPC round trips as the legacy picker did on a cache miss.
+        """
+        caching = self.vllm_config.cache_config.enable_prefix_caching
+        if caching:
+            for rank in range(self.dp_size):
+                self._send_command(rank,
+                                   SchedulerCommand.PROBE_COMPUTED_BLOCKS,
+                                   request)
+        for rank in range(self.dp_size):
+            self._send_command(rank, SchedulerCommand.GET_RANK_LOAD)
+
+        hits = [0] * self.dp_size
+        if caching:
+            for rank in range(self.dp_size):
+                hits[rank] = self._get_result(
+                    rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
+        loads = []
+        for rank in range(self.dp_size):
+            state = dict(self._get_result(rank,
+                                          SchedulerCommand.GET_RANK_LOAD))
+            state["max_seqs"] = self._max_seqs_per_rank
+            state["routed_total"] = self._rank_routed_total[rank]
+            loads.append(state)
+
+        info: Dict[str, Any] = {}
+        rank = pick_rank(hits,
+                         loads,
+                         self.block_size,
+                         cfg=self._picker_cfg,
+                         info=info)
+        reason = info.get("reason", "load")
+        self._route_reasons[reason] = self._route_reasons.get(reason, 0) + 1
+        logger.debug("DPScheduler route %s -> rank %d (%s) hits=%s loads=%s",
+                     getattr(request, "request_id", "?"), rank, reason, hits,
+                     loads)
+        return rank
 
     def add_request(self, request: Request) -> None:
         """
@@ -736,6 +837,7 @@ class DPScheduler(SchedulerInterface):
         """Route a single request to a DP rank and send ADD_REQUEST IPC."""
         rank = self._find_best_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
+        self._rank_routed_total[rank] += 1
         if self._rank_metrics is not None:
             self._rank_metrics.add_routed(rank)
 
