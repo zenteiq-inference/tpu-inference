@@ -52,8 +52,9 @@ from tpu_inference import envs
 from tpu_inference.core.sched.dp_metrics import (DPRankMetrics,
                                                  aggregate_kv_usage,
                                                  count_preemptions)
-from tpu_inference.core.sched.dp_rank_hint import (
-    get_dp_rank_hint, install_input_processor_hook)
+from tpu_inference.core.sched.dp_rank_hint import (get_dp_rank_hint,
+                                                   install_input_processor_hook
+                                                   )
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import time_function
 
@@ -76,6 +77,7 @@ class SchedulerCommand(Enum):
     GET_TOKEN_COUNT = "get_token_count"
     GET_PENDING_PREFILL_TOKENS = "get_pending_prefill_tokens"
     GET_MIN_REMAINING_OUTPUT = "get_min_remaining_output"
+    GET_KV_USAGE = "get_kv_usage"
     PROBE_COMPUTED_BLOCKS = "probe_computed_blocks"
     RESET_ENCODER_CACHE = "reset_encoder_cache"
     SET_PAUSE_STATE = "set_pause_state"
@@ -423,6 +425,13 @@ def _scheduler_worker_process(
                             min(r.max_tokens - len(r.output_token_ids)
                                 for r in scheduler.running))
 
+                case SchedulerCommand.GET_KV_USAGE:
+                    # Resident KV of this rank: (fraction of the pool in use,
+                    # pool size in blocks).
+                    kv_cache_mgr = scheduler.kv_cache_manager
+                    _send_result((kv_cache_mgr.usage,
+                                  kv_cache_mgr.block_pool.num_gpu_blocks))
+
                 case SchedulerCommand.PROBE_COMPUTED_BLOCKS:
                     # Probe for cached blocks without recording prefix cache stats.
                     request = data
@@ -568,6 +577,9 @@ class DPScheduler(SchedulerInterface):
         # vllm:kv_cache_usage_perc (envs.DP_SCHED_KV_AGGREGATE, validated there)
         # and the per-rank metrics published from this process; see dp_metrics.
         self._kv_aggregate: str = envs.DP_SCHED_KV_AGGREGATE.lower()
+        # Resident-KV term of the least-loaded picker (0 = off, the default).
+        self._least_loaded_kv_weight: float = (
+            envs.DP_SCHED_LEAST_LOADED_KV_WEIGHT)
         self._rank_metrics: Optional[DPRankMetrics] = (
             DPRankMetrics.from_vllm_config(
                 vllm_config, self.dp_size,
@@ -847,8 +859,17 @@ class DPScheduler(SchedulerInterface):
         Ties on load with fewest in-flight requests, then the rank whose
         running request is closest to its max_tokens (so most likely to free
         a slot soonest).
+
+        The load is pending prefill + uncached prompt tokens, which does not
+        see what a rank already holds in KV. With
+        DP_SCHED_LEAST_LOADED_KV_WEIGHT > 0 the rank's resident KV (blocks in
+        use x block size, in tokens) times that weight is added, so a rank that
+        is full of decode state stops attracting requests only because it
+        cached their template. A prefix hit still wins while the resident-KV
+        gap (tokens) x weight is below the tokens the hit saves.
         """
         enable_cache = self.vllm_config.cache_config.enable_prefix_caching
+        kv_weight = self._least_loaded_kv_weight
 
         # Send every query first, then collect, so ranks answer in parallel.
         for rank in range(self.dp_size):
@@ -860,6 +881,8 @@ class DPScheduler(SchedulerInterface):
                                SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
             self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
             self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+            if kv_weight > 0:
+                self._send_command(rank, SchedulerCommand.GET_KV_USAGE)
 
         num_tokens = request.num_tokens
         loads: Dict[int, int] = {}
@@ -878,6 +901,11 @@ class DPScheduler(SchedulerInterface):
             inflight[rank] = running + waiting
             min_remaining[rank] = self._get_result(
                 rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+            if kv_weight > 0:
+                usage, num_blocks = self._get_result(
+                    rank, SchedulerCommand.GET_KV_USAGE)
+                resident_tokens = usage * num_blocks * self.block_size
+                loads[rank] += int(kv_weight * resident_tokens)
 
         return min(range(self.dp_size),
                    key=lambda r: (loads[r], inflight[r], min_remaining[r]))

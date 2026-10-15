@@ -16,6 +16,7 @@ import json
 import os
 from types import SimpleNamespace
 from unittest import mock
+from unittest.mock import MagicMock
 
 import torch
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
@@ -224,3 +225,45 @@ def routed_per_rank(scheduler) -> dict:
     for rank in scheduler.assigned_dp_rank.values():
         counts[rank] = counts.get(rank, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def make_mocked_dp_scheduler(dp: int = 2,
+                             *,
+                             caching: bool = True,
+                             max_num_seqs: int = 8,
+                             block_size: int = 16,
+                             blocks_per_rank: int = 100,
+                             log_stats: bool = True):
+    """A DPScheduler with NO worker processes: Pipe/Process are mocked, so a
+    test replaces ``_send_command`` / ``_get_result`` and exercises the
+    scheduler's own logic (routing, stats combination, logging)."""
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    from tpu_inference.core.sched import dp_scheduler as dps
+    cfg = MagicMock()
+    cfg.sharding_config = MagicMock()
+    cfg.sharding_config.total_dp_size = dp
+    cfg.scheduler_config = MagicMock()
+    cfg.scheduler_config._original_scheduler_cls = Scheduler
+    cfg.scheduler_config.max_num_seqs = max_num_seqs
+    cfg.scheduler_config.max_num_batched_tokens = 65536
+    cfg.scheduler_config.async_scheduling = False
+    cfg.cache_config = MagicMock()
+    cfg.cache_config.enable_prefix_caching = caching
+    cfg.cache_config.prefix_caching_hash_algo = "sha256"
+    cfg.cache_config.mamba_num_blocks = None
+    cfg.model_config.served_model_name = "dp-test-model"
+    ctx = MagicMock()
+    ctx.Pipe = MagicMock(return_value=(MagicMock(), MagicMock()))
+    ctx.Process = MagicMock(return_value=MagicMock())
+    kv_cache_config = MagicMock(spec=KVCacheConfig)
+    kv_cache_config.num_blocks = blocks_per_rank * dp
+    with mock.patch(
+            "tpu_inference.core.sched.dp_scheduler._scheduler_worker_process"
+    ), mock.patch("multiprocessing.get_context", return_value=ctx), \
+            mock.patch("vllm.v1.core.kv_cache_utils.init_none_hash"):
+        return dps.DPScheduler(vllm_config=cfg,
+                               kv_cache_config=kv_cache_config,
+                               structured_output_manager=MagicMock(),
+                               block_size=block_size,
+                               log_stats=log_stats)

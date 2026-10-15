@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
     DP_SCHED_ROUTING: str = "least_loaded"
+    DP_SCHED_LEAST_LOADED_KV_WEIGHT: float = 0.0
     DP_SCHED_KV_AGGREGATE: str = "mean"
     DP_SCHED_RANK_METRICS: bool = True
     DP_SCHED_RANK_METRICS_INTERVAL_S: float = 1.0
@@ -148,6 +149,26 @@ def env_with_choices(
         return value
 
     return _get_validated_env
+
+
+def _non_negative_float(env_name: str, default: float) -> Callable[[], float]:
+    """A finite float >= 0; anything else raises like the other validated envs."""
+
+    def _get() -> float:
+        raw = os.getenv(env_name)
+        if raw is None or raw.strip() == "":
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            value = float("nan")
+        if not 0.0 <= value < float("inf"):
+            raise ValueError(
+                f"Invalid value '{raw}' for {env_name}: expected a finite "
+                "number >= 0.")
+        return value
+
+    return _get
 
 
 def env_bool(env_name: str,
@@ -486,6 +507,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_with_choices("DP_SCHED_ROUTING",
                      "least_loaded", ["least_loaded", "round_robin"],
                      case_sensitive=False),
+    # DP scheduler, least_loaded routing: weight of a rank's RESIDENT KV (tokens
+    # held in blocks in use) added to its load, which is otherwise only pending
+    # prefill + uncached prompt tokens. 0 (default) is the upstream behaviour.
+    # With prefix caching and requests that share a template, 0 lets the rank
+    # that cached the template attract every request while its KV fills and the
+    # other ranks idle. A prefix hit still wins while (resident-KV gap in
+    # tokens) x weight < (tokens the hit saves): 1.0 balances resident KV almost
+    # exactly (affinity only breaks ties); a small weight keeps affinity until
+    # the ranks are far apart, e.g. 0.05 with a 1.3k-token template tolerates a
+    # ~26k-token gap.
+    "DP_SCHED_LEAST_LOADED_KV_WEIGHT":
+    _non_negative_float("DP_SCHED_LEAST_LOADED_KV_WEIGHT", 0.0),
     # DP scheduler: how the per-rank KV-cache usage is reduced into the single
     # vllm:kv_cache_usage_perc gauge. "mean" (default) is the pooled usage and
     # hides one full rank behind idle ones; "max" exports the hottest rank,
