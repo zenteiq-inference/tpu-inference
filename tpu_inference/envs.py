@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
     DP_SCHED_ROUTING: str = "legacy"
+    DP_SCHED_RANK_LOG_INTERVAL_S: str = "10"
     DP_SCHED_KV_AGGREGATE: str = "mean"
     DP_SCHED_RANK_METRICS: bool = True
     DP_SCHED_RANK_METRICS_INTERVAL_S: float = 1.0
@@ -372,6 +373,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # dp_rank_picker). A client-requested rank always wins.
     "DP_SCHED_ROUTING":
     lambda: os.getenv("DP_SCHED_ROUTING", "legacy"),
+    # DP scheduler: seconds between per-rank "DPRANK ..." INFO lines (running,
+    # waiting, KV usage, preemptions, routed requests and routing reasons per
+    # rank; works with legacy routing too). 0 disables; a bad value means 10.
+    "DP_SCHED_RANK_LOG_INTERVAL_S":
+    lambda: os.getenv("DP_SCHED_RANK_LOG_INTERVAL_S", "10"),
     # DP scheduler: how the per-rank KV-cache usage is reduced into the single
     # vllm:kv_cache_usage_perc gauge. "mean" (default) is the pooled usage and
     # hides one full rank behind idle ones; "max" exports the hottest rank,

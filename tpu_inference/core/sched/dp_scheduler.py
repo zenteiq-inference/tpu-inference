@@ -508,6 +508,22 @@ class DPScheduler(SchedulerInterface):
         logger.info("DPScheduler rank routing=%s picker=%s",
                     self._rank_routing, self._picker_cfg)
 
+        # Per-rank DPRANK log line every DP_SCHED_RANK_LOG_INTERVAL_S seconds
+        # (0 disables); a bad value means the default, never a failed start.
+        try:
+            self._rank_log_interval_s: float = float(
+                envs.DP_SCHED_RANK_LOG_INTERVAL_S)
+        except ValueError:
+            self._rank_log_interval_s = 10.0
+        if self._rank_log_interval_s != self._rank_log_interval_s:
+            self._rank_log_interval_s = 10.0  # nan would log on every step
+        self._rank_log_last: float = 0.0
+        self._rank_preempt_total: List[int] = [0] * self.dp_size
+        logger.info(
+            "DPScheduler batch-prefill flush timeout=%d ms, DPRANK log "
+            "interval=%.1f s", self._batch_prefill_flush_timeout_ms,
+            self._rank_log_interval_s)
+
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
         if vllm_config.cache_config.enable_prefix_caching:
@@ -917,8 +933,11 @@ class DPScheduler(SchedulerInterface):
 
         # Per-rank preemptions: SchedulerOutput.preempted_req_ids is per rank
         # and is dropped when the outputs are combined below.
+        preempted = count_preemptions(rank_outputs)
+        for rank, count in enumerate(preempted):
+            self._rank_preempt_total[rank] += count
         if self._rank_metrics is not None:
-            self._rank_metrics.add_preemptions(count_preemptions(rank_outputs))
+            self._rank_metrics.add_preemptions(preempted)
 
         # Cache scheduler outputs to use in `update_from_output`
         self.cached_schedulers_output.append(rank_outputs)
@@ -1029,6 +1048,52 @@ class DPScheduler(SchedulerInterface):
             num_computed_tokens=combined_num_computed_tokens,
             num_output_tokens=combined_num_output_tokens,
         )
+
+    def _maybe_log_rank_stats(
+            self, rank_stats_list: List[Optional[SchedulerStats]]) -> None:
+        """One logfmt-style INFO line with the per-rank picture (grep DPRANK).
+
+        Source is the per-rank SchedulerStats that update_from_output already
+        receives (no extra IPC). Counters (preempt, routed, route_*) are totals
+        since start; use rate() over the log timestamps. Never raises.
+        """
+        interval = self._rank_log_interval_s
+        if interval <= 0:
+            return
+        now = time()
+        if now - self._rank_log_last < interval:
+            return
+        self._rank_log_last = now
+        try:
+            fields = []
+            kvs = []
+            for rank, st in enumerate(rank_stats_list):
+                if st is None:
+                    fields.append("r%d_kv=NA" % rank)
+                else:
+                    kv = float(st.kv_cache_usage)
+                    kvs.append(kv)
+                    fields.append(
+                        "r%d_run=%d r%d_wait=%d r%d_skip=%d r%d_kv=%.4f" %
+                        (rank, st.num_running_reqs, rank, st.num_waiting_reqs,
+                         rank, getattr(st, "num_skipped_waiting_reqs",
+                                       0), rank, kv))
+                fields.append("r%d_preempt=%d" %
+                              (rank, self._rank_preempt_total[rank]))
+                fields.append("r%d_routed=%d" %
+                              (rank, self._rank_routed_total[rank]))
+            if kvs:
+                fields.append("kv_max=%.4f kv_mean=%.4f" %
+                              (max(kvs), sum(kvs) / len(kvs)))
+            reasons = self._route_reasons
+            if reasons:
+                fields.append(" ".join("route_%s=%d" % (k, reasons[k])
+                                       for k in sorted(reasons)))
+            logger.info("DPRANK step=%d routing=%s held=%d %s",
+                        self._schedule_step_count, self._rank_routing,
+                        len(self._pending_new_requests), " ".join(fields))
+        except Exception:
+            logger.debug("DPRANK stats logging failed", exc_info=True)
 
     def _combine_scheduler_stats(
         self,
@@ -1177,6 +1242,7 @@ class DPScheduler(SchedulerInterface):
         # summed, KV reduced) by the combine below: publish them first.
         if self._rank_metrics is not None:
             self._rank_metrics.observe_stats(rank_scheduler_stats)
+        self._maybe_log_rank_stats(rank_scheduler_stats)
 
         # Combine scheduler stats from all DP ranks
         combined_stats = self._combine_scheduler_stats(rank_scheduler_stats)
