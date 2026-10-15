@@ -29,7 +29,7 @@ from tpu_inference.core.sched import dp_scheduler as dps
 from tpu_inference.core.sched.dp_scheduler import (SchedulerCommand,
                                                    _vllm_config_for_rank)
 
-DP_SIZES = [2, 3, 4]
+DP_SIZES = [2, 3, 4, 8]
 
 
 @pytest.fixture(scope="module")

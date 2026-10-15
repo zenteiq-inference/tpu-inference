@@ -382,7 +382,7 @@ class TestDPSchedulerRouting:
 # ---------------------------------------------------------------------------
 # 4. end to end: real DPScheduler, real forked rank workers, real vLLM schedulers
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("dp", [2, 3, 4])
+@pytest.mark.parametrize("dp", [2, 3, 4, 8])
 def test_hinted_requests_land_on_their_rank_end_to_end(model_dir, monkeypatch,
                                                        dp):
     monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)
