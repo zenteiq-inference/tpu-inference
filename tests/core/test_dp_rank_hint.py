@@ -17,6 +17,7 @@ Covers, from the HTTP header value down to the rank a request lands on:
 
 CPU only: ``VLLM_TARGET_DEVICE=empty JAX_PLATFORMS=cpu``.
 """
+import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -260,6 +261,46 @@ class TestInputProcessorHook:
 # ---------------------------------------------------------------------------
 # 3. the hop to the scheduler, then DPScheduler routing
 # ---------------------------------------------------------------------------
+def _header_parser():
+    """vLLM's own header parser, wherever this vLLM keeps it."""
+    for module, name in (
+        ("vllm.entrypoints.openai.engine.serving", "OpenAIServing"),
+        ("vllm.entrypoints.generate.base.serving", "GenerateBaseServing"),
+    ):
+        try:
+            cls = getattr(importlib.import_module(module), name)
+        except (ImportError, AttributeError):
+            continue
+        if hasattr(cls, "_get_data_parallel_rank"):
+            return cls._get_data_parallel_rank
+    pytest.skip("this vLLM has no X-data-parallel-rank header parser")
+
+
+@pytest.mark.parametrize("dp", [2, 8])
+def test_header_text_to_accepted_rank(model_dir, hook_installed, dp):
+    """The header's text through vLLM's own parser, then the hook: every
+    rank's string is accepted, out-of-range text is a 400, junk text is
+    silently no hint (vLLM's parser returns None for it)."""
+    parse = _header_parser()
+    _, ip = _processor(model_dir, dp)
+
+    def request_with(value):
+        headers = {} if value is None else {"X-data-parallel-rank": value}
+        return SimpleNamespace(headers=headers)
+
+    for rank in range(dp):
+        parsed = parse(request_with(str(rank)))
+        assert parsed == rank
+        ecr = _process(ip, parsed)
+        assert ecr.sampling_params.extra_args == {"dp_rank": rank}
+    with pytest.raises(REJECTED, match=rf"out of range \[0, {dp}\)"):
+        _process(ip, parse(request_with(str(dp))))
+    for junk in (None, "", "one", "1.5"):
+        assert parse(request_with(junk)) is None
+        assert not _process(ip, parse(
+            request_with(junk))).sampling_params.extra_args
+
+
 def test_hint_survives_the_engine_core_msgpack_hop(model_dir, hook_installed):
     """API server -> (msgpack over ZMQ) -> EngineCore -> Request."""
     _, ip = _processor(model_dir, 4)
