@@ -75,6 +75,9 @@ if TYPE_CHECKING:
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
     DP_SCHED_ROUTING: str = "least_loaded"
+    DP_SCHED_KV_AGGREGATE: str = "mean"
+    DP_SCHED_RANK_METRICS: bool = True
+    DP_SCHED_RANK_METRICS_INTERVAL_S: float = 1.0
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
@@ -483,6 +486,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_with_choices("DP_SCHED_ROUTING",
                      "least_loaded", ["least_loaded", "round_robin"],
                      case_sensitive=False),
+    # DP scheduler: how the per-rank KV-cache usage is reduced into the single
+    # vllm:kv_cache_usage_perc gauge. "mean" (default) is the pooled usage and
+    # hides one full rank behind idle ones; "max" exports the hottest rank,
+    # which is the number that predicts preemption.
+    "DP_SCHED_KV_AGGREGATE":
+    env_with_choices("DP_SCHED_KV_AGGREGATE",
+                     "mean", ["mean", "max"],
+                     case_sensitive=False),
+    # DP scheduler: export per-rank gauges/counters labelled dp_rank
+    # (tpu_inference:dp_rank_*) from the EngineCore process.
+    "DP_SCHED_RANK_METRICS":
+    env_bool("DP_SCHED_RANK_METRICS", default=True),
+    # DP scheduler: minimum seconds between per-rank gauge updates (0 = every
+    # scheduler step). Counters are never throttled.
+    "DP_SCHED_RANK_METRICS_INTERVAL_S":
+    lambda: float(os.getenv("DP_SCHED_RANK_METRICS_INTERVAL_S", "1.0")),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
     "VLLM_MOE_CHUNK_SIZE":

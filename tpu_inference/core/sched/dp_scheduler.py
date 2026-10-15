@@ -49,6 +49,9 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tpu_inference import envs
+from tpu_inference.core.sched.dp_metrics import (DPRankMetrics,
+                                                 aggregate_kv_usage,
+                                                 count_preemptions)
 from tpu_inference.core.sched.dp_rank_hint import (
     get_dp_rank_hint, install_input_processor_hook)
 from tpu_inference.logger import init_logger
@@ -505,6 +508,16 @@ class DPScheduler(SchedulerInterface):
         self._batch_prefill_last_flush: float = time()
         self._pending_new_requests: List[Request] = []
 
+        # How per-rank KV usage is reduced into the exported
+        # vllm:kv_cache_usage_perc (envs.DP_SCHED_KV_AGGREGATE, validated there)
+        # and the per-rank metrics published from this process; see dp_metrics.
+        self._kv_aggregate: str = envs.DP_SCHED_KV_AGGREGATE.lower()
+        self._rank_metrics: Optional[DPRankMetrics] = (
+            DPRankMetrics.from_vllm_config(
+                vllm_config, self.dp_size,
+                envs.DP_SCHED_RANK_METRICS_INTERVAL_S)
+            if envs.DP_SCHED_RANK_METRICS else None)
+
         # How new requests are assigned to ranks (envs.DP_SCHED_ROUTING,
         # validated there); see RoutingPolicy for the available options.
         self._routing_policy = self.RoutingPolicy(
@@ -861,6 +874,8 @@ class DPScheduler(SchedulerInterface):
         """Route a single request to a DP rank and send ADD_REQUEST IPC."""
         rank = self._pick_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
+        if self._rank_metrics is not None:
+            self._rank_metrics.add_routed(rank)
 
         self._send_command(rank, SchedulerCommand.ADD_REQUEST, request)
         self._get_result(rank, SchedulerCommand.ADD_REQUEST)
@@ -935,6 +950,11 @@ class DPScheduler(SchedulerInterface):
         # Collect outputs from all workers (unordered to avoid HOL blocking)
         rank_outputs = self._collect_results_unordered(
             SchedulerCommand.SCHEDULE)
+
+        # Per-rank preemptions: SchedulerOutput.preempted_req_ids is per rank
+        # and is dropped when the outputs are combined below.
+        if self._rank_metrics is not None:
+            self._rank_metrics.add_preemptions(count_preemptions(rank_outputs))
 
         # Cache scheduler outputs to use in `update_from_output`
         self.cached_schedulers_output.append(rank_outputs)
@@ -1192,7 +1212,6 @@ class DPScheduler(SchedulerInterface):
         """
         total_running_reqs = 0
         total_waiting_reqs = 0
-        total_kv_cache_usage = 0.0
 
         combined_prefix_cache_stats = PrefixCacheStats()
         combined_connector_prefix_cache_stats: Optional[
@@ -1207,7 +1226,6 @@ class DPScheduler(SchedulerInterface):
 
             total_running_reqs += rank_stats.num_running_reqs
             total_waiting_reqs += rank_stats.num_waiting_reqs
-            total_kv_cache_usage += rank_stats.kv_cache_usage
 
             # Combine prefix cache stats
             if rank_stats.prefix_cache_stats:
@@ -1252,10 +1270,11 @@ class DPScheduler(SchedulerInterface):
         if not has_any_stats:
             return None
 
-        # Average KV cache usage across ranks
-        num_ranks = len(rank_stats_list)
-        avg_kv_cache_usage = (total_kv_cache_usage /
-                              num_ranks if num_ranks else 0.0)
+        # Reduce per-rank KV cache usage (mean by default, max with
+        # DP_SCHED_KV_AGGREGATE=max); a rank without stats counts as 0.
+        kv_cache_usage = aggregate_kv_usage(
+            [None if rs is None else rs.kv_cache_usage for rs in rank_stats_list],
+            self._kv_aggregate)
 
         self._log_dp_rank_balance(rank_stats_list, total_running_reqs,
                                   total_waiting_reqs)
@@ -1263,7 +1282,7 @@ class DPScheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=total_running_reqs,
             num_waiting_reqs=total_waiting_reqs,
-            kv_cache_usage=avg_kv_cache_usage,
+            kv_cache_usage=kv_cache_usage,
             prefix_cache_stats=combined_prefix_cache_stats,
             connector_prefix_cache_stats=combined_connector_prefix_cache_stats,
             spec_decoding_stats=combined_spec_decoding_stats,
@@ -1356,6 +1375,11 @@ class DPScheduler(SchedulerInterface):
                 if engine_output.scheduler_stats is not None:
                     rank_stats = engine_output.scheduler_stats
             rank_scheduler_stats.append(rank_stats)
+
+        # The per-rank stats exist right here and are merged (running/waiting
+        # summed, KV reduced) by the combine below: publish them first.
+        if self._rank_metrics is not None:
+            self._rank_metrics.observe_stats(rank_scheduler_stats)
 
         # Combine scheduler stats from all DP ranks
         combined_stats = self._combine_scheduler_stats(rank_scheduler_stats)
@@ -1608,7 +1632,7 @@ class DPScheduler(SchedulerInterface):
         # Aggregate stats from all schedulers
         total_running_reqs = 0
         total_waiting_reqs = 0
-        total_kv_cache_usage = 0.0
+        rank_kv_cache_usage: List[Optional[float]] = [None] * self.dp_size
 
         combined_prefix_cache_stats = PrefixCacheStats()
         combined_connector_prefix_cache_stats: Optional[
@@ -1627,7 +1651,7 @@ class DPScheduler(SchedulerInterface):
 
             total_running_reqs += rank_stats.num_running_reqs
             total_waiting_reqs += rank_stats.num_waiting_reqs
-            total_kv_cache_usage += rank_stats.kv_cache_usage
+            rank_kv_cache_usage[rank] = rank_stats.kv_cache_usage
 
             # Combine prefix cache stats
             if rank_stats.prefix_cache_stats:
@@ -1645,8 +1669,9 @@ class DPScheduler(SchedulerInterface):
                 combined_connector_prefix_cache_stats.queries += rank_stats.connector_prefix_cache_stats.queries
                 combined_connector_prefix_cache_stats.hits += rank_stats.connector_prefix_cache_stats.hits
 
-        # Average KV cache usage across ranks
-        avg_kv_cache_usage = total_kv_cache_usage / self.dp_size if self.dp_size else 0.0
+        # Reduce per-rank KV cache usage (see DP_SCHED_KV_AGGREGATE)
+        kv_cache_usage = aggregate_kv_usage(rank_kv_cache_usage,
+                                            self._kv_aggregate)
 
         self._log_dp_rank_balance(rank_stats_list, total_running_reqs,
                                   total_waiting_reqs)
@@ -1654,7 +1679,7 @@ class DPScheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=total_running_reqs,
             num_waiting_reqs=total_waiting_reqs,
-            kv_cache_usage=avg_kv_cache_usage,
+            kv_cache_usage=kv_cache_usage,
             prefix_cache_stats=combined_prefix_cache_stats,
             connector_prefix_cache_stats=combined_connector_prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
