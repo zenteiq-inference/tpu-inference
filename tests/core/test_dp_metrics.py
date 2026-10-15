@@ -31,6 +31,7 @@ from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 
 from tests.core import dp_testlib as lib
 from tpu_inference import envs
+from tpu_inference.core.sched import dp_metrics
 from tpu_inference.core.sched.dp_metrics import (DPRankMetrics,
                                                  aggregate_kv_usage,
                                                  count_preemptions)
@@ -338,6 +339,63 @@ class TestDPRankMetrics:
             served_model_name=MagicMock()))
         m = DPRankMetrics.from_vllm_config(cfg, 2, 1.0)
         assert m.enabled
+
+
+class TestEnsureMultiprocessValueClass:
+    """The value-class switch must only happen when it can work."""
+
+    @staticmethod
+    def _freeze_mutex(monkeypatch):
+        import prometheus_client.values as values
+
+        class MutexValue:  # what prometheus_client froze before the fork
+            pass
+
+        monkeypatch.setattr(values, "ValueClass", MutexValue)
+        return values, MutexValue
+
+    def test_no_directory_no_switch(self, monkeypatch):
+        values, mutex = self._freeze_mutex(monkeypatch)
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+        monkeypatch.delenv("prometheus_multiproc_dir", raising=False)
+        assert dp_metrics.ensure_multiprocess_value_class() is False
+        assert values.ValueClass is mutex
+
+    @pytest.mark.parametrize(
+        "name", ["PROMETHEUS_MULTIPROC_DIR", "prometheus_multiproc_dir"])
+    def test_usable_directory_switches_once(self, monkeypatch, tmp_path, name):
+        values, mutex = self._freeze_mutex(monkeypatch)
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+        monkeypatch.delenv("prometheus_multiproc_dir", raising=False)
+        monkeypatch.setenv(name, str(tmp_path))
+        assert dp_metrics.ensure_multiprocess_value_class() is True
+        switched = values.ValueClass
+        assert switched is not mutex and switched.__name__ == "MmapedValue"
+        assert dp_metrics.ensure_multiprocess_value_class() is True
+        assert values.ValueClass is switched  # not switched again
+
+    def test_missing_directory_leaves_the_process_alone(
+            self, monkeypatch, tmp_path):
+        values, mutex = self._freeze_mutex(monkeypatch)
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR",
+                           str(tmp_path / "does-not-exist"))
+        assert dp_metrics.ensure_multiprocess_value_class() is False
+        assert values.ValueClass is mutex
+
+    def test_unwritable_directory_leaves_the_process_alone(
+            self, monkeypatch, tmp_path):
+        if os.geteuid() == 0:
+            pytest.skip("root can write anywhere")
+        values, mutex = self._freeze_mutex(monkeypatch)
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        try:
+            monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(locked))
+            assert dp_metrics.ensure_multiprocess_value_class() is False
+            assert values.ValueClass is mutex
+        finally:
+            locked.chmod(0o700)
 
 
 # ---------------------------------------------------------------------------

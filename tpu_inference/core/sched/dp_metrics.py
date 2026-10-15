@@ -62,7 +62,6 @@ from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
-KV_AGGREGATE_MODES = ("mean", "max")
 METRIC_NAMESPACE = "tpu_inference"
 _LABELS = ("model_name", "engine", "dp_rank")
 
@@ -82,27 +81,36 @@ def aggregate_kv_usage(per_rank: Sequence[Optional[float]],
     return sum(values) / len(values)
 
 
-def _multiprocess_dir_set() -> bool:
-    return bool(
-        os.environ.get("PROMETHEUS_MULTIPROC_DIR")
-        or os.environ.get("prometheus_multiproc_dir"))
+def _multiprocess_dir() -> Optional[str]:
+    """PROMETHEUS_MULTIPROC_DIR (or the legacy lowercase name), if it is set."""
+    return (os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+            or os.environ.get("prometheus_multiproc_dir") or None)
 
 
 def ensure_multiprocess_value_class() -> bool:
     """Make metrics created from now on in THIS process land in the
-    multiprocess directory. Returns True when the directory is set (whether or
-    not a switch was needed). See the module docstring for why it is needed.
+    multiprocess directory. Returns True when a usable directory is set
+    (whether or not a switch was needed). See the module docstring for why it
+    is needed.
+
+    A set-but-unusable directory (missing or not writable) leaves everything
+    as it is: switching would make every metric created afterwards in this
+    process fail, not just ours.
     """
-    if not _multiprocess_dir_set():
+    directory = _multiprocess_dir()
+    if directory is None:
+        return False
+    if not (os.path.isdir(directory) and os.access(directory, os.W_OK)):
+        logger.warning(
+            "PROMETHEUS_MULTIPROC_DIR=%s is not a writable directory; "
+            "per-rank DP metrics stay in this process only.", directory)
         return False
     import prometheus_client.values as values
     if getattr(values.ValueClass, "__name__", "") == "MutexValue":
         values.ValueClass = values.MultiProcessValue()
         logger.info(
             "Per-rank DP metrics: switched prometheus_client to "
-            "multiprocess values (%s).",
-            os.environ.get("PROMETHEUS_MULTIPROC_DIR")
-            or os.environ.get("prometheus_multiproc_dir"))
+            "multiprocess values (%s).", directory)
     return True
 
 
