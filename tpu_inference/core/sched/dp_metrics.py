@@ -67,7 +67,8 @@ METRIC_NAMESPACE = "tpu_inference"
 _LABELS = ("model_name", "engine", "dp_rank")
 
 
-def aggregate_kv_usage(per_rank: Sequence[Optional[float]], mode: str) -> float:
+def aggregate_kv_usage(per_rank: Sequence[Optional[float]],
+                       mode: str) -> float:
     """Reduce per-rank KV usage (``None`` = rank reported nothing = 0.0).
 
     ``mean`` divides by the number of ranks, so a silent rank counts as idle;
@@ -97,10 +98,11 @@ def ensure_multiprocess_value_class() -> bool:
     import prometheus_client.values as values
     if getattr(values.ValueClass, "__name__", "") == "MutexValue":
         values.ValueClass = values.MultiProcessValue()
-        logger.info("Per-rank DP metrics: switched prometheus_client to "
-                    "multiprocess values (%s).",
-                    os.environ.get("PROMETHEUS_MULTIPROC_DIR")
-                    or os.environ.get("prometheus_multiproc_dir"))
+        logger.info(
+            "Per-rank DP metrics: switched prometheus_client to "
+            "multiprocess values (%s).",
+            os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+            or os.environ.get("prometheus_multiproc_dir"))
     return True
 
 
@@ -150,12 +152,12 @@ def _get_families(registry: Any) -> _Families:
                 f"{ns}:dp_rank_kv_cache_usage_perc",
                 "KV-cache usage (1 = 100%) of one DP rank's block pool.",
                 registry),
-            running=_make_gauge(
-                f"{ns}:dp_rank_num_requests_running",
-                "Number of requests running on one DP rank.", registry),
-            waiting=_make_gauge(
-                f"{ns}:dp_rank_num_requests_waiting",
-                "Number of requests waiting on one DP rank.", registry),
+            running=_make_gauge(f"{ns}:dp_rank_num_requests_running",
+                                "Number of requests running on one DP rank.",
+                                registry),
+            waiting=_make_gauge(f"{ns}:dp_rank_num_requests_waiting",
+                                "Number of requests waiting on one DP rank.",
+                                registry),
             preemptions=Counter(
                 f"{ns}:dp_rank_num_preemptions",
                 "Cumulative number of preemptions on one DP rank.",

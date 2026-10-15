@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from prometheus_client import REGISTRY, CollectorRegistry, generate_latest
+from prometheus_client import REGISTRY, CollectorRegistry
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -31,16 +31,14 @@ from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 
 from tests.core import dp_testlib as lib
 from tpu_inference import envs
-from tpu_inference.core.sched import dp_metrics
 from tpu_inference.core.sched.dp_metrics import (DPRankMetrics,
                                                  aggregate_kv_usage,
                                                  count_preemptions)
-from tpu_inference.core.sched.dp_scheduler import (DPScheduler,
-                                                   SchedulerCommand)
+from tpu_inference.core.sched.dp_scheduler import DPScheduler, SchedulerCommand
 
 DP_SIZES = [2, 3, 4, 8]
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 @pytest.fixture(scope="module")
@@ -73,7 +71,8 @@ class TestAggregate:
     @pytest.mark.parametrize("dp", DP_SIZES)
     def test_one_full_rank_mean_vs_max(self, dp):
         per_rank = [0.919] + [0.0] * (dp - 1)
-        assert aggregate_kv_usage(per_rank, "mean") == pytest.approx(0.919 / dp)
+        assert aggregate_kv_usage(per_rank,
+                                  "mean") == pytest.approx(0.919 / dp)
         assert aggregate_kv_usage(per_rank, "max") == pytest.approx(0.919)
 
     def test_none_counts_as_an_idle_rank(self):
@@ -137,8 +136,9 @@ def _mocked_scheduler(dp, monkeypatch, env=None):
     ctx.Process = MagicMock(return_value=MagicMock())
     kv_cache_config = MagicMock(spec=KVCacheConfig)
     kv_cache_config.num_blocks = 100 * dp
-    with patch("tpu_inference.core.sched.dp_scheduler._scheduler_worker_process"
-               ), patch("multiprocessing.get_context", return_value=ctx):
+    with patch(
+            "tpu_inference.core.sched.dp_scheduler._scheduler_worker_process"
+    ), patch("multiprocessing.get_context", return_value=ctx):
         return DPScheduler(vllm_config=cfg,
                            kv_cache_config=kv_cache_config,
                            structured_output_manager=MagicMock(),
@@ -186,11 +186,11 @@ class TestCombineStats:
     @pytest.mark.parametrize("mode,expected", [("mean", 0.5), ("max", 0.8)])
     def test_make_stats_follows_the_same_env(self, monkeypatch, mode,
                                              expected):
-        s = _mocked_scheduler(2, monkeypatch,
-                              {"DP_SCHED_KV_AGGREGATE": mode})
+        s = _mocked_scheduler(2, monkeypatch, {"DP_SCHED_KV_AGGREGATE": mode})
         s._send_command = MagicMock()
         s._get_result = MagicMock(
-            side_effect=[_stats(3, 1, 0.8), _stats(2, 0, 0.2)])
+            side_effect=[_stats(3, 1, 0.8),
+                         _stats(2, 0, 0.2)])
         out = s.make_stats()
         assert out.kv_cache_usage == pytest.approx(expected)
         assert (out.num_running_reqs, out.num_waiting_reqs) == (5, 1)
@@ -228,24 +228,34 @@ class TestDPRankMetrics:
         registry, _ = self._metrics(dp=3)
         for rank in range(3):
             labels = dict(model_name="m", engine="0", dp_rank=str(rank))
-            assert _sample(registry, "tpu_inference:dp_rank_kv_cache_usage_perc",
+            assert _sample(registry,
+                           "tpu_inference:dp_rank_kv_cache_usage_perc",
                            **labels) == 0.0
-            assert _sample(registry, "tpu_inference:dp_rank_num_preemptions_total",
+            assert _sample(registry,
+                           "tpu_inference:dp_rank_num_preemptions_total",
                            **labels) == 0.0
 
     def test_observe_stats_sets_all_three_gauges(self):
         registry, m = self._metrics()
         m.observe_stats([_stats(7, 3, 0.9), None])
         labels = dict(model_name="m", engine="0")
-        assert _sample(registry, "tpu_inference:dp_rank_kv_cache_usage_perc",
-                       dp_rank="0", **labels) == pytest.approx(0.9)
-        assert _sample(registry, "tpu_inference:dp_rank_num_requests_running",
-                       dp_rank="0", **labels) == 7
-        assert _sample(registry, "tpu_inference:dp_rank_num_requests_waiting",
-                       dp_rank="0", **labels) == 3
+        assert _sample(registry,
+                       "tpu_inference:dp_rank_kv_cache_usage_perc",
+                       dp_rank="0",
+                       **labels) == pytest.approx(0.9)
+        assert _sample(registry,
+                       "tpu_inference:dp_rank_num_requests_running",
+                       dp_rank="0",
+                       **labels) == 7
+        assert _sample(registry,
+                       "tpu_inference:dp_rank_num_requests_waiting",
+                       dp_rank="0",
+                       **labels) == 3
         # a rank that reported nothing keeps its last value (here 0)
-        assert _sample(registry, "tpu_inference:dp_rank_kv_cache_usage_perc",
-                       dp_rank="1", **labels) == 0.0
+        assert _sample(registry,
+                       "tpu_inference:dp_rank_kv_cache_usage_perc",
+                       dp_rank="1",
+                       **labels) == 0.0
 
     def test_gauge_updates_are_throttled_and_counters_are_not(self):
         clock = _Clock()
@@ -267,10 +277,16 @@ class TestDPRankMetrics:
         m.add_routed(1)
         assert _sample(registry, "tpu_inference:dp_rank_num_preemptions_total",
                        **labels) == 3
-        assert _sample(registry, "tpu_inference:dp_rank_num_preemptions_total",
-                       model_name="m", engine="0", dp_rank="1") == 4
-        assert _sample(registry, "tpu_inference:dp_rank_requests_routed_total",
-                       model_name="m", engine="0", dp_rank="1") == 2
+        assert _sample(registry,
+                       "tpu_inference:dp_rank_num_preemptions_total",
+                       model_name="m",
+                       engine="0",
+                       dp_rank="1") == 4
+        assert _sample(registry,
+                       "tpu_inference:dp_rank_requests_routed_total",
+                       model_name="m",
+                       engine="0",
+                       dp_rank="1") == 2
 
     def test_zero_interval_publishes_every_step(self):
         registry, m = self._metrics(interval_s=0)
@@ -286,7 +302,8 @@ class TestDPRankMetrics:
         b = DPRankMetrics(model_name="m", dp_size=2, registry=registry)
         a.add_routed(0)
         b.add_routed(0)
-        assert _sample(registry, "tpu_inference:dp_rank_requests_routed_total",
+        assert _sample(registry,
+                       "tpu_inference:dp_rank_requests_routed_total",
                        dp_rank="0") == 2
 
     def test_a_metrics_failure_never_raises(self):
@@ -301,16 +318,19 @@ class TestDPRankMetrics:
     def test_name_clash_disables_instead_of_raising(self):
         from prometheus_client import Gauge
         registry = CollectorRegistry()
-        Gauge("tpu_inference:dp_rank_kv_cache_usage_perc", "squatter",
+        Gauge("tpu_inference:dp_rank_kv_cache_usage_perc",
+              "squatter",
               registry=registry)
         m = DPRankMetrics(model_name="m", dp_size=2, registry=registry)
         assert not m.enabled
         m.add_routed(0)
 
     def test_count_preemptions(self):
-        outs = [SimpleNamespace(preempted_req_ids={"a", "b"}),
-                SimpleNamespace(preempted_req_ids=None),
-                SimpleNamespace()]
+        outs = [
+            SimpleNamespace(preempted_req_ids={"a", "b"}),
+            SimpleNamespace(preempted_req_ids=None),
+            SimpleNamespace()
+        ]
         assert count_preemptions(outs) == [2, 0, 0]
 
     def test_model_name_falls_back_when_not_a_string(self):
@@ -360,10 +380,13 @@ class TestDPSchedulerWiring:
             o.num_scheduled_tokens = {}
             o.total_num_scheduled_tokens = 0
             o.finished_req_ids = set()
-            o.scheduled_cached_reqs = SimpleNamespace(
-                req_ids=[], resumed_req_ids=[], new_token_ids=[],
-                all_token_ids={}, new_block_ids=[], num_computed_tokens=[],
-                num_output_tokens=[])
+            o.scheduled_cached_reqs = SimpleNamespace(req_ids=[],
+                                                      resumed_req_ids=[],
+                                                      new_token_ids=[],
+                                                      all_token_ids={},
+                                                      new_block_ids=[],
+                                                      num_computed_tokens=[],
+                                                      num_output_tokens=[])
             o.scheduled_spec_decode_tokens = {}
             o.scheduled_encoder_inputs = {}
             o.num_common_prefix_blocks = []
@@ -418,8 +441,10 @@ def test_exported_gauge_vs_per_rank_gauges(model_dir, monkeypatch, dp, mode):
         prom = PrometheusStatLogger(vc, engine_indexes=[0])
         prom.record(scheduler_stats=stats, iteration_stats=None, engine_idx=0)
         model = vc.model_config.served_model_name
-        exported = _sample(REGISTRY, "vllm:kv_cache_usage_perc",
-                           model_name=model, engine="0")
+        exported = _sample(REGISTRY,
+                           "vllm:kv_cache_usage_perc",
+                           model_name=model,
+                           engine="0")
         expected = (max(per_rank_kv) if mode == "max" else sum(per_rank_kv) /
                     dp)
         assert exported == pytest.approx(expected)
@@ -436,17 +461,23 @@ def test_exported_gauge_vs_per_rank_gauges(model_dir, monkeypatch, dp, mode):
                            **base) == pytest.approx(per_rank_kv[rank])
         # the per-rank counts add up to the exported vLLM ones
         running = sum(
-            _sample(REGISTRY, "tpu_inference:dp_rank_num_requests_running",
-                    dp_rank=str(r), **base) for r in range(dp))
+            _sample(REGISTRY,
+                    "tpu_inference:dp_rank_num_requests_running",
+                    dp_rank=str(r),
+                    **base) for r in range(dp))
         waiting = sum(
-            _sample(REGISTRY, "tpu_inference:dp_rank_num_requests_waiting",
-                    dp_rank=str(r), **base) for r in range(dp))
+            _sample(REGISTRY,
+                    "tpu_inference:dp_rank_num_requests_waiting",
+                    dp_rank=str(r),
+                    **base) for r in range(dp))
         assert running == _sample(REGISTRY, "vllm:num_requests_running",
                                   **base)
         assert waiting == _sample(REGISTRY, "vllm:num_requests_waiting",
                                   **base)
-        assert _sample(REGISTRY, "tpu_inference:dp_rank_requests_routed_total",
-                       dp_rank="0", **base) >= 12
+        assert _sample(REGISTRY,
+                       "tpu_inference:dp_rank_requests_routed_total",
+                       dp_rank="0",
+                       **base) >= 12
     finally:
         s.shutdown()
 
@@ -456,7 +487,9 @@ def test_per_rank_preemptions_match_vllms_own_events(model_dir, monkeypatch):
     hot rank only. Our per-rank counter must equal the PREEMPTED events vLLM
     itself emits for those requests."""
     monkeypatch.setenv("DP_SCHED_RANK_METRICS_INTERVAL_S", "0")
-    vc, s = lib.make_real_dp_scheduler(model_dir, 2, pool_blocks_per_rank=36,
+    vc, s = lib.make_real_dp_scheduler(model_dir,
+                                       2,
+                                       pool_blocks_per_rank=36,
                                        max_num_seqs=64)
     try:
         s._batch_prefills = False
@@ -481,10 +514,12 @@ def test_per_rank_preemptions_match_vllms_own_events(model_dir, monkeypatch):
         base = dict(model_name=vc.model_config.served_model_name, engine="0")
         counted0 = _sample(REGISTRY,
                            "tpu_inference:dp_rank_num_preemptions_total",
-                           dp_rank="0", **base)
+                           dp_rank="0",
+                           **base)
         counted1 = _sample(REGISTRY,
                            "tpu_inference:dp_rank_num_preemptions_total",
-                           dp_rank="1", **base)
+                           dp_rank="1",
+                           **base)
         # the registry is process-wide: compare increments of this test only
         assert counted1 == _PREEMPT_BASELINE.get(1, 0)
         assert counted0 - _PREEMPT_BASELINE.get(0, 0) == events
@@ -499,7 +534,8 @@ _PREEMPT_BASELINE: dict = {}
 def _snapshot_preemption_counters():
     _PREEMPT_BASELINE.clear()
     for rank in (0, 1):
-        value = _sample(REGISTRY, "tpu_inference:dp_rank_num_preemptions_total",
+        value = _sample(REGISTRY,
+                        "tpu_inference:dp_rank_num_preemptions_total",
                         dp_rank=str(rank))
         if value is not None:
             _PREEMPT_BASELINE[rank] = value
@@ -512,14 +548,18 @@ def _snapshot_preemption_counters():
 def _run_probe(model_dir, mode, dp):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
-        [REPO_ROOT] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
+        [REPO_ROOT] +
+        [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
     env.pop("PROMETHEUS_MULTIPROC_DIR", None)
     probe = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "dp_metrics_fork_probe.py")
     proc = subprocess.run(
         [sys.executable, "-B", probe, REPO_ROOT, model_dir, mode,
          str(dp)],
-        capture_output=True, text=True, timeout=300, env=env)
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env)
     assert proc.returncode == 0, proc.stderr[-3000:]
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
@@ -552,8 +592,7 @@ def test_per_rank_series_reach_the_api_server_registry(model_dir, dp):
     assert sorted(kv) == [str(r) for r in range(dp)]
     assert kv["0"] > 0.1 and all(kv[str(r)] == 0.0 for r in range(1, dp))
     assert running["0"] == got["child"]["combined_running"] > 0
-    assert routed["0"] == 10 and all(routed[str(r)] == 0
-                                     for r in range(1, dp))
+    assert routed["0"] == 10 and all(routed[str(r)] == 0 for r in range(1, dp))
     # the mean the engine exports is the hot rank diluted by the idle ones
     assert got["child"]["combined_kv"] == pytest.approx(kv["0"] / dp, rel=1e-6)
 

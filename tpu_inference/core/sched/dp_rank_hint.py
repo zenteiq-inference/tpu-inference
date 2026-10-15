@@ -136,9 +136,10 @@ def _attach_hint(engine_core_request: Any, rank: int) -> None:
         extras[DP_RANK_HINT_KEY] = rank
         params.extra_kwargs = extras
         return
-    _warn_once("no-params",
-               "X-data-parallel-rank was validated but the request has no "
-               "params object to carry it; routing it with the normal picker.")
+    _warn_once(
+        "no-params",
+        "X-data-parallel-rank was validated but the request has no "
+        "params object to carry it; routing it with the normal picker.")
 
 
 def _range_error(rank: int, num_ranks: int) -> Exception:
@@ -167,9 +168,9 @@ def install_input_processor_hook() -> bool:
     try:
         from vllm.v1.engine.input_processor import InputProcessor
     except Exception as e:  # ImportError, or a heavy transitive import failing
-        _warn_once("import",
-                   "DP rank hint hook not installed: cannot import vLLM "
-                   "InputProcessor (%s).", e)
+        _warn_once(
+            "import", "DP rank hint hook not installed: cannot import vLLM "
+            "InputProcessor (%s).", e)
         return False
 
     original = InputProcessor.process_inputs
@@ -177,9 +178,9 @@ def install_input_processor_hook() -> bool:
         return True
     signature = inspect.signature(original)
     if "data_parallel_rank" not in signature.parameters:
-        _warn_once("signature",
-                   "DP rank hint hook not installed: InputProcessor."
-                   "process_inputs has no data_parallel_rank parameter.")
+        _warn_once(
+            "signature", "DP rank hint hook not installed: InputProcessor."
+            "process_inputs has no data_parallel_rank parameter.")
         return False
 
     @functools.wraps(original)
@@ -208,8 +209,9 @@ def install_input_processor_hook() -> bool:
     setattr(process_inputs, _HOOK_MARKER, True)
     process_inputs.__wrapped_original__ = original  # for tests / uninstall
     InputProcessor.process_inputs = process_inputs
-    logger.info("Installed DP rank hint hook: X-data-parallel-rank is honoured "
-                "by the SPMD DPScheduler.")
+    logger.info(
+        "Installed DP rank hint hook: X-data-parallel-rank is honoured "
+        "by the SPMD DPScheduler.")
     return True
 
 

@@ -31,8 +31,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 from tests.core import dp_testlib as lib
 from tpu_inference.core.sched import dp_rank_hint as hint
-from tpu_inference.core.sched.dp_scheduler import (DPScheduler,
-                                                   SchedulerCommand)
+from tpu_inference.core.sched.dp_scheduler import DPScheduler, SchedulerCommand
 
 try:  # newer vLLM raises this (a 400) instead of a plain ValueError
     from vllm.exceptions import VLLMValidationError
@@ -64,7 +63,8 @@ def _processor(model_dir, dp):
     tpu-inference DP override, exactly as in an API-server process."""
     vc = lib.make_vllm_config(model_dir, parallel_dp=dp)
     assert vc.parallel_config.data_parallel_size == dp
-    lib.apply_tpu_sharding(vc)  # pins data_parallel_size to 1, selects DPScheduler
+    lib.apply_tpu_sharding(
+        vc)  # pins data_parallel_size to 1, selects DPScheduler
     assert vc.parallel_config.data_parallel_size == 1
     assert vc.sharding_config.total_dp_size == dp
     return vc, InputProcessor(vc)
@@ -99,7 +99,12 @@ class TestGetDpRankHint:
         for rank in range(dp):
             assert hint.get_dp_rank_hint(_req({"dp_rank": rank}), dp) == rank
 
-    @pytest.mark.parametrize("extra", [None, {}, {"other": 1}, {"dp_rank": None}])
+    @pytest.mark.parametrize("extra",
+                             [None, {}, {
+                                 "other": 1
+                             }, {
+                                 "dp_rank": None
+                             }])
     def test_no_hint(self, extra):
         assert hint.get_dp_rank_hint(_req(extra), 4) is None
 
@@ -158,8 +163,9 @@ class TestInputProcessorHook:
 
     @pytest.mark.parametrize("dp", DP_SIZES)
     @pytest.mark.parametrize("positional", [False, True])
-    def test_every_rank_is_accepted_and_carried(self, model_dir, hook_installed,
-                                                dp, positional):
+    def test_every_rank_is_accepted_and_carried(self, model_dir,
+                                                hook_installed, dp,
+                                                positional):
         _, ip = _processor(model_dir, dp)
         for rank in range(dp):
             ecr = _process(ip, rank, positional=positional)
@@ -218,7 +224,8 @@ class TestInputProcessorHook:
         with pytest.raises(REJECTED, match=r"out of range \[0, 2\)"):
             _process(ip, 2)
 
-    def test_steps_aside_for_a_plain_scheduler(self, model_dir, hook_installed):
+    def test_steps_aside_for_a_plain_scheduler(self, model_dir,
+                                               hook_installed):
         vc = lib.make_vllm_config(model_dir)
         vc.sharding_config = SimpleNamespace(total_dp_size=4)  # no DPScheduler
         assert hint.dp_scheduler_rank_count(vc) == 1
@@ -235,8 +242,8 @@ class TestInputProcessorHook:
         hint.uninstall_input_processor_hook()
         try:
             _processor(model_dir, 2)
-            assert getattr(InputProcessor.process_inputs,
-                           hint._HOOK_MARKER, False)
+            assert getattr(InputProcessor.process_inputs, hint._HOOK_MARKER,
+                           False)
         finally:
             hint.uninstall_input_processor_hook()
 
@@ -244,7 +251,9 @@ class TestInputProcessorHook:
                                                  hook_installed):
         _, ip = _processor(model_dir, 2)
         with pytest.raises(TypeError):
-            ip.process_inputs("r", PROMPT, SamplingParams(), ("generate", ),
+            ip.process_inputs("r",
+                              PROMPT,
+                              SamplingParams(), ("generate", ),
                               not_a_parameter=1)
 
 
@@ -375,7 +384,7 @@ class TestDPSchedulerRouting:
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("dp", [2, 3, 4])
 def test_hinted_requests_land_on_their_rank_end_to_end(model_dir, monkeypatch,
-                                                      dp):
+                                                       dp):
     monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)
     _, s = lib.make_real_dp_scheduler(model_dir, dp)
     try:
@@ -407,8 +416,8 @@ def test_hinted_requests_land_on_their_rank_end_to_end(model_dir, monkeypatch,
         running_plus_waiting = []
         for rank in range(dp):
             s._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
-            running, waiting = s._get_result(rank,
-                                             SchedulerCommand.GET_REQUEST_COUNTS)
+            running, waiting = s._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
             running_plus_waiting.append(running + waiting)
         pinned_to_rank = sum(1 for r in s.assigned_dp_rank.values()
                              if r == target)
@@ -427,9 +436,8 @@ def test_header_to_rank_chain(model_dir, monkeypatch, hook_installed):
     try:
         s._batch_prefills = False
         for rid, header_rank in (("a", 1), ("b", 1), ("c", 1), ("d", 0)):
-            ecr = ip.process_inputs(rid, {
-                "prompt_token_ids": list(range(1, 200))
-            },
+            ecr = ip.process_inputs(rid,
+                                    {"prompt_token_ids": list(range(1, 200))},
                                     SamplingParams(max_tokens=8),
                                     supported_tasks=("generate", ),
                                     data_parallel_rank=header_rank)

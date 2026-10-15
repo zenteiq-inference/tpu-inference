@@ -1328,9 +1328,9 @@ class DPScheduler(SchedulerInterface):
 
         # Reduce per-rank KV cache usage (mean by default, max with
         # DP_SCHED_KV_AGGREGATE=max); a rank without stats counts as 0.
-        kv_cache_usage = aggregate_kv_usage(
-            [None if rs is None else rs.kv_cache_usage for rs in rank_stats_list],
-            self._kv_aggregate)
+        kv_cache_usage = aggregate_kv_usage([
+            None if rs is None else rs.kv_cache_usage for rs in rank_stats_list
+        ], self._kv_aggregate)
 
         self._log_dp_rank_balance(rank_stats_list, total_running_reqs,
                                   total_waiting_reqs)
