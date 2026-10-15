@@ -18,8 +18,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VllmConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VllmConfig)
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
@@ -63,8 +63,7 @@ def _platform_hook_off():
     """Keep VllmConfig() independent of the platform that happens to be active
     (CPU test venv: none; TPU host: TpuPlatform adjusts block sizes etc.)."""
     from vllm.platforms import current_platform
-    with mock.patch.object(current_platform,
-                           "check_and_update_config",
+    with mock.patch.object(current_platform, "check_and_update_config",
                            lambda *a, **k: None):
         yield
 
@@ -93,13 +92,13 @@ def make_vllm_config(model_dir,
     if kv_events_config is not None:
         kwargs["kv_events_config"] = kv_events_config
     with _platform_hook_off():
-        return VllmConfig(model_config=model_config,
-                          cache_config=cache_config,
-                          scheduler_config=scheduler_config,
-                          parallel_config=ParallelConfig(
-                              data_parallel_size=parallel_dp),
-                          device_config=DeviceConfig(device="cpu"),
-                          **kwargs)
+        return VllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            scheduler_config=scheduler_config,
+            parallel_config=ParallelConfig(data_parallel_size=parallel_dp),
+            device_config=DeviceConfig(device="cpu"),
+            **kwargs)
 
 
 def apply_tpu_sharding(vllm_config: VllmConfig):
@@ -141,12 +140,12 @@ def make_real_dp_scheduler(model_dir,
                              num_kv_heads=2,
                              head_size=16,
                              dtype=torch.bfloat16)
-    kv_cache_config = KVCacheConfig(
-        num_blocks=pool_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["l0"], kv_cache_spec=spec)
-        ])
+    kv_cache_config = KVCacheConfig(num_blocks=pool_blocks,
+                                    kv_cache_tensors=[],
+                                    kv_cache_groups=[
+                                        KVCacheGroupSpec(layer_names=["l0"],
+                                                         kv_cache_spec=spec)
+                                    ])
     scheduler = dps.DPScheduler(
         vllm_config=vc,
         kv_cache_config=kv_cache_config,
@@ -200,14 +199,15 @@ def step(scheduler):
     combined SchedulerStats."""
     out = scheduler.schedule()
     ids = list(out.num_scheduled_tokens)
-    runner_output = ModelRunnerOutput(
-        req_ids=ids,
-        req_id_to_index={r: i
-                         for i, r in enumerate(ids)},
-        sampled_token_ids=[[5] for _ in ids],
-        logprobs=None,
-        prompt_logprobs_dict={},
-        pooler_output=[None] * len(ids))
+    runner_output = ModelRunnerOutput(req_ids=ids,
+                                      req_id_to_index={
+                                          r: i
+                                          for i, r in enumerate(ids)
+                                      },
+                                      sampled_token_ids=[[5] for _ in ids],
+                                      logprobs=None,
+                                      prompt_logprobs_dict={},
+                                      pooler_output=[None] * len(ids))
     return scheduler.update_from_output(out, runner_output)
 
 

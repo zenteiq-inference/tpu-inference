@@ -138,17 +138,20 @@ class TestEndpointLog:
 
     def test_logs_where_the_rank_publishes(self):
         from unittest.mock import patch
-        scheduler = SimpleNamespace(get_kv_event_publisher_config=lambda: SimpleNamespace(
-            endpoint="tcp://10.0.0.5:5558", replay_endpoint=None))
+        scheduler = SimpleNamespace(
+            get_kv_event_publisher_config=lambda: SimpleNamespace(
+                endpoint="tcp://10.0.0.5:5558", replay_endpoint=None))
         with patch.object(dps.logger, "info") as info:
             dps._log_kv_events_endpoint(scheduler, 1)
         assert info.call_count == 1
         assert info.call_args.args[1:] == (1, "tcp://10.0.0.5:5558", None)
 
-    @pytest.mark.parametrize("scheduler", [
-        SimpleNamespace(),  # older vLLM: no such method
-        SimpleNamespace(get_kv_event_publisher_config=lambda: None),
-    ])
+    @pytest.mark.parametrize(
+        "scheduler",
+        [
+            SimpleNamespace(),  # older vLLM: no such method
+            SimpleNamespace(get_kv_event_publisher_config=lambda: None),
+        ])
     def test_silent_without_a_publisher(self, scheduler):
         from unittest.mock import patch
         with patch.object(dps.logger, "info") as info:
@@ -224,8 +227,8 @@ def _publish_and_collect(scheduler, per_rank_ports, dp, timeout_s=15.0):
         scheduler._batch_prefills = False
         deadline = time.time() + timeout_s
         round_no = 0
-        while time.time() < deadline and not all(
-                v["kinds"] for v in seen.values()):
+        while time.time() < deadline and not all(v["kinds"]
+                                                 for v in seen.values()):
             for rank in range(dp):
                 scheduler.add_request(
                     lib.make_request(f"r{round_no}-{rank}",
@@ -251,8 +254,7 @@ def _publish_and_collect(scheduler, per_rank_ports, dp, timeout_s=15.0):
 
 
 @pytest.mark.parametrize("dp", DP_SIZES)
-def test_binding_endpoint_gives_every_rank_its_own_port_and_tag(
-        model_dir, dp):
+def test_binding_endpoint_gives_every_rank_its_own_port_and_tag(model_dir, dp):
     """The default / llm-d style wiring: tcp://*:BASE. Rank r publishes on
     BASE + r and tags its batches r; no worker dies."""
     base = _free_port_block(dp)

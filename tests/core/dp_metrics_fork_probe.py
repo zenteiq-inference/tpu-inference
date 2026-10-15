@@ -20,7 +20,6 @@ usage: dp_metrics_fork_probe.py <repo_root> <model_dir> <forced|stock> <dp>
 Prints one JSON object: {"child": {...}, "metrics": [<exposition lines>]}.
 """
 import json
-import os
 import sys
 
 repo_root, model_dir, mode, dp = sys.argv[1], sys.argv[2], sys.argv[3], int(
@@ -80,5 +79,9 @@ if __name__ == "__main__":
         ln for ln in text.splitlines()
         if ln.startswith("tpu_inference:dp_rank_")
     ]
-    print(json.dumps({"child": child, "metrics": lines,
-                      "start_method": ctx.get_start_method()}))
+    print(
+        json.dumps({
+            "child": child,
+            "metrics": lines,
+            "start_method": ctx.get_start_method()
+        }))
