@@ -427,7 +427,7 @@ def _rank_kv(scheduler, rank):
                                  SchedulerCommand.MAKE_STATS).kv_cache_usage
 
 
-@pytest.mark.parametrize("dp", [2, 3, 4])
+@pytest.mark.parametrize("dp", [2, 3, 4, 8])
 @pytest.mark.parametrize("mode", ["mean", "max"])
 def test_exported_gauge_vs_per_rank_gauges(model_dir, monkeypatch, dp, mode):
     monkeypatch.setenv("DP_SCHED_KV_AGGREGATE", mode)
