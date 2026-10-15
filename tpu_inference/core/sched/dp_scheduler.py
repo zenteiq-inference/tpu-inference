@@ -49,6 +49,8 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tpu_inference import envs
+from tpu_inference.core.sched.dp_rank_hint import (
+    get_dp_rank_hint, install_input_processor_hook)
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import time_function
 
@@ -450,6 +452,8 @@ class DPScheduler(SchedulerInterface):
     **Load Balancing**
 
     For new requests:
+    - If the client pinned a rank (X-data-parallel-rank header or
+      vllm_xargs {"dp_rank": N}, see dp_rank_hint), assigns it to that rank
     - If there is prefix cache hit, assigns request to the rank with the best hit
     - Otherwise, assigns request to the rank with the least total tokens
 
@@ -829,8 +833,24 @@ class DPScheduler(SchedulerInterface):
 
         self._route_and_forward_request(request)
 
+    def _requested_rank(self, request: Request) -> Optional[int]:
+        """The DP rank the client pinned this request to, or None.
+
+        Set by the ``X-data-parallel-rank`` header (or ``vllm_xargs.dp_rank``);
+        see ``dp_rank_hint``. Missing, malformed and out-of-range hints give
+        None so the request is routed by the configured policy.
+        """
+        return get_dp_rank_hint(request, self.dp_size)
+
     def _pick_rank_for_request(self, request: Request) -> int:
-        """Choose the DP rank for a new request per the routing policy."""
+        """Choose the DP rank for a new request per the routing policy.
+
+        A client-requested rank (X-data-parallel-rank) wins over every policy
+        and does not advance the round-robin cursor.
+        """
+        requested = self._requested_rank(request)
+        if requested is not None:
+            return requested
         if self._routing_policy == self.RoutingPolicy.ROUND_ROBIN:
             rank = self._round_robin_next_rank
             self._round_robin_next_rank = (rank + 1) % self.dp_size
@@ -1730,6 +1750,10 @@ def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
     dp_size = vllm_config.sharding_config.total_dp_size
 
     if dp_size > 1:
+        # vLLM's X-data-parallel-rank check sees data_parallel_size == 1 under
+        # SPMD DP; make it validate against the real DP size and carry the rank
+        # to the DPScheduler (see dp_rank_hint).
+        install_input_processor_hook()
         if vllm_config.scheduler_config.async_scheduling:
             vllm_config.scheduler_config._original_scheduler_cls = AsyncScheduler
         else:
